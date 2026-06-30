@@ -17,7 +17,7 @@ const CLIENT_CODE = process.env.CLIENT_CODE;
 const PIN = process.env.PIN;
 const TOTP_SECRET = process.env.TOTP_SECRET;
 
-function headers(apiKey, withAuth) {
+function makeHeaders(apiKey, withAuth) {
   const h = {
     'Content-Type': 'application/json',
     'Accept': 'application/json',
@@ -28,17 +28,18 @@ function headers(apiKey, withAuth) {
     'X-MACAddress': '00:00:00:00:00:00',
     'X-PrivateKey': apiKey
   };
-  if (withAuth) h['Authorization'] = `Bearer ${jwtToken}`;
+  if (withAuth) h['Authorization'] = 'Bearer ' + jwtToken;
   return h;
 }
 
 async function login(apiKey, clientCode, pin, totpSecret) {
   try {
     const totp = speakeasy.totp({ secret: totpSecret, encoding: 'base32' });
-    const res = await fetch(`${BASE_URL}/rest/auth/angelbroking/user/v1/loginByPassword`, {
+    console.log('Logging in, TOTP:', totp);
+    const res = await fetch(BASE_URL + '/rest/auth/angelbroking/user/v1/loginByPassword', {
       method: 'POST',
-      headers: headers(apiKey, false),
-      body: JSON.stringify({ clientcode: clientCode, password: pin, totp })
+      headers: makeHeaders(apiKey, false),
+      body: JSON.stringify({ clientcode: clientCode, password: pin, totp: totp })
     });
     const data = await res.json();
     if (data.status) {
@@ -50,50 +51,52 @@ async function login(apiKey, clientCode, pin, totpSecret) {
     console.log('Login failed:', data.message);
     return { success: false, message: data.message };
   } catch (err) {
+    console.log('Login error:', err.message);
     return { success: false, message: err.message };
   }
 }
 
 async function loadInstruments() {
   try {
-    console.log('Loading instrument master, this may take 10-20 seconds...');
+    console.log('Loading instrument master...');
     const res = await fetch('https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json');
-    instruments = await res.json();
+    const text = await res.text();
+    instruments = JSON.parse(text);
     instrumentsLoadedAt = new Date();
-    console.log('Instrument master loaded:', instruments.length, 'instruments');
+    console.log('Instruments loaded:', instruments.length);
   } catch (err) {
-    console.log('Failed to load instrument master:', err.message);
+    console.log('Instrument load failed:', err.message);
   }
 }
 
-setInterval(() => {
+setInterval(function() {
   if (API_KEY) login(API_KEY, CLIENT_CODE, PIN, TOTP_SECRET);
 }, 3 * 60 * 60 * 1000);
 
 setInterval(loadInstruments, 24 * 60 * 60 * 1000);
 
-app.get('/api/health', (req, res) => {
+app.get('/api/health', function(req, res) {
   res.json({
     status: 'ok',
     connected: !!jwtToken,
-    lastLogin,
+    lastLogin: lastLogin,
     instrumentsLoaded: !!instruments,
     instrumentCount: instruments ? instruments.length : 0,
-    instrumentsLoadedAt
+    instrumentsLoadedAt: instrumentsLoadedAt
   });
 });
 
-app.post('/api/login', async (req, res) => {
-  const { apiKey, clientCode, pin, totpSecret } = req.body;
-  res.json(await login(apiKey, clientCode, pin, totpSecret));
+app.post('/api/login', async function(req, res) {
+  const result = await login(req.body.apiKey, req.body.clientCode, req.body.pin, req.body.totpSecret);
+  res.json(result);
 });
 
-app.post('/api/quotes', async (req, res) => {
+app.post('/api/quotes', async function(req, res) {
   try {
     if (!jwtToken) return res.json({ success: false, message: 'Not logged in' });
-    const r = await fetch(`${BASE_URL}/rest/secure/angelbroking/market/v1/quote/`, {
+    const r = await fetch(BASE_URL + '/rest/secure/angelbroking/market/v1/quote/', {
       method: 'POST',
-      headers: headers(API_KEY, true),
+      headers: makeHeaders(API_KEY, true),
       body: JSON.stringify({ mode: 'FULL', exchangeTokens: req.body.tokens })
     });
     const data = await r.json();
@@ -103,61 +106,58 @@ app.post('/api/quotes', async (req, res) => {
   }
 });
 
-app.get('/api/expiries/:symbol', async (req, res) => {
-  try {
-    if (!instruments) {
-      return res.json({ success: false, message: 'Instruments still loading, try again in 20 seconds' });
-    }
-    const symbol = req.params.symbol.toUpperCase();
-    const matches = instruments.filter(inst =>
-      inst.name === symbol && inst.instrumenttype === 'OPTIDX'
-    );
-    const expirySet = new Set(matches.map(m => m.expiry));
-    const expiries = Array.from(expirySet).sort();
-    res.json({ success: true, symbol, expiries, count: matches.length });
-  } catch (err) {
-    res.json({ success: false, message: err.message });
-  }
+app.get('/api/load-instruments', async function(req, res) {
+  await loadInstruments();
+  res.json({
+    success: !!instruments,
+    count: instruments ? instruments.length : 0,
+    message: instruments ? 'Loaded successfully' : 'Failed to load'
+  });
 });
 
-app.get('/api/option-chain/:symbol/:expiry', async (req, res) => {
+app.get('/api/expiries/:symbol', function(req, res) {
+  if (!instruments) return res.json({ success: false, message: 'Instruments not loaded yet. Call /api/load-instruments first.' });
+  const symbol = req.params.symbol.toUpperCase();
+  const matches = instruments.filter(function(inst) {
+    return inst.name === symbol && inst.instrumenttype === 'OPTIDX';
+  });
+  const expirySet = new Set(matches.map(function(m) { return m.expiry; }));
+  const expiries = Array.from(expirySet).sort();
+  res.json({ success: true, symbol: symbol, expiries: expiries, count: matches.length });
+});
+
+app.get('/api/option-chain/:symbol/:expiry', async function(req, res) {
   try {
     if (!jwtToken) return res.json({ success: false, message: 'Not logged in' });
-    if (!instruments) {
-      return res.json({ success: false, message: 'Instruments still loading, try again in 20 seconds' });
-    }
+    if (!instruments) return res.json({ success: false, message: 'Instruments not loaded. Call /api/load-instruments first.' });
 
     const symbol = req.params.symbol.toUpperCase();
     const expiry = req.params.expiry.toUpperCase();
 
-    const matches = instruments.filter(inst =>
-      inst.name === symbol &&
-      inst.expiry === expiry &&
-      inst.instrumenttype === 'OPTIDX'
-    );
+    const matches = instruments.filter(function(inst) {
+      return inst.name === symbol && inst.expiry === expiry && inst.instrumenttype === 'OPTIDX';
+    });
 
     if (matches.length === 0) {
       return res.json({
         success: false,
-        message: 'No instruments found',
-        symbol,
-        expiry,
-        hint: 'Check /api/expiries/' + symbol + ' for valid expiry format'
+        message: 'No instruments found for ' + symbol + ' ' + expiry,
+        hint: 'Check /api/expiries/' + symbol + ' for valid expiry dates'
       });
     }
 
-    const tokens = matches.map(m => m.token);
+    const tokens = matches.map(function(m) { return m.token; });
     const batches = [];
     for (let i = 0; i < tokens.length; i += 50) {
       batches.push(tokens.slice(i, i + 50));
     }
 
     let allQuotes = [];
-    for (const batch of batches) {
-      const r = await fetch(`${BASE_URL}/rest/secure/angelbroking/market/v1/quote/`, {
+    for (let b = 0; b < batches.length; b++) {
+      const r = await fetch(BASE_URL + '/rest/secure/angelbroking/market/v1/quote/', {
         method: 'POST',
-        headers: headers(API_KEY, true),
-        body: JSON.stringify({ mode: 'FULL', exchangeTokens: { NFO: batch } })
+        headers: makeHeaders(API_KEY, true),
+        body: JSON.stringify({ mode: 'FULL', exchangeTokens: { NFO: batches[b] } })
       });
       const data = await r.json();
       if (data.status && data.data && data.data.fetched) {
@@ -165,8 +165,8 @@ app.get('/api/option-chain/:symbol/:expiry', async (req, res) => {
       }
     }
 
-    const chain = allQuotes.map(quote => {
-      const inst = matches.find(m => m.token === quote.symbolToken);
+    const chain = allQuotes.map(function(quote) {
+      const inst = matches.find(function(m) { return m.token === quote.symbolToken; });
       return {
         strike: inst ? parseFloat(inst.strike) / 100 : null,
         type: inst ? (inst.symbol.endsWith('CE') ? 'CE' : 'PE') : null,
@@ -184,15 +184,17 @@ app.get('/api/option-chain/:symbol/:expiry', async (req, res) => {
       };
     });
 
-    res.json({ success: true, symbol, expiry, strikeCount: chain.length, data: chain });
+    res.json({ success: true, symbol: symbol, expiry: expiry, strikeCount: chain.length, data: chain });
   } catch (err) {
     res.json({ success: false, message: err.message });
   }
 });
 
 const PORT = process.env.PORT || 5001;
-app.listen(PORT, '0.0.0.0', async () => {
-  console.log('Proxy running on', PORT);
-  if (API_KEY) await login(API_KEY, CLIENT_CODE, PIN, TOTP_SECRET);
+app.listen(PORT, '0.0.0.0', async function() {
+  console.log('Proxy running on port', PORT);
+  if (API_KEY && CLIENT_CODE && PIN && TOTP_SECRET) {
+    await login(API_KEY, CLIENT_CODE, PIN, TOTP_SECRET);
+  }
   loadInstruments();
 });
