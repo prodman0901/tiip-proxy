@@ -58,12 +58,23 @@ async function login(apiKey, clientCode, pin, totpSecret) {
 
 async function loadInstruments() {
   try {
-    console.log('Loading instrument master...');
-    const res = await fetch('https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json');
-    const text = await res.text();
-    instruments = JSON.parse(text);
-    instrumentsLoadedAt = new Date();
-    console.log('Instruments loaded:', instruments.length);
+    console.log('Loading instrument master from disk...');
+    const fs = require('fs');
+    const path = require('path');
+    const filePath = path.join(__dirname, 'instruments.json');
+    if (fs.existsSync(filePath)) {
+      const text = fs.readFileSync(filePath, 'utf8');
+      instruments = JSON.parse(text);
+      instrumentsLoadedAt = new Date();
+      console.log('Instruments loaded from disk:', instruments.length);
+    } else {
+      console.log('instruments.json not found on disk, trying URL...');
+      const res = await fetch('https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json');
+      const text2 = await res.text();
+      instruments = JSON.parse(text2);
+      instrumentsLoadedAt = new Date();
+      console.log('Instruments loaded from URL:', instruments.length);
+    }
   } catch (err) {
     console.log('Instrument load failed:', err.message);
   }
