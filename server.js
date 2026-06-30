@@ -140,41 +140,111 @@ app.get('/api/expiries/:symbol', function(req, res) {
 app.get('/api/option-chain/:symbol/:expiry', async function(req, res) {
   try {
     if (!jwtToken) return res.json({ success: false, message: 'Not logged in' });
-    if (!instruments) return res.json({ success: false, message: 'Instruments not loaded. Call /api/load-instruments first.' });
+    if (!instruments) return res.json({ success: false, message: 'Instruments not loaded' });
 
     const symbol = req.params.symbol.toUpperCase();
     const expiry = req.params.expiry.toUpperCase();
 
     const matches = instruments.filter(function(inst) {
-      return inst.name === symbol && inst.expiry === expiry && inst.instrumenttype === 'OPTIDX';
+      return inst.name === symbol && 
+             inst.expiry === expiry && 
+             inst.instrumenttype === 'OPTIDX';
     });
 
     if (matches.length === 0) {
       return res.json({
         success: false,
-        message: 'No instruments found for ' + symbol + ' ' + expiry,
-        hint: 'Check /api/expiries/' + symbol + ' for valid expiry dates'
+        message: 'No instruments found',
+        symbol: symbol,
+        expiry: expiry,
+        hint: 'Check /api/expiries/' + symbol
       });
     }
 
-    const tokens = matches.map(function(m) { return m.token; });
-    const batches = [];
-    for (let i = 0; i < tokens.length; i += 50) {
-      batches.push(tokens.slice(i, i + 50));
+    console.log('Found', matches.length, 'instruments for', symbol, expiry);
+
+    // Get first batch of 50 tokens for testing
+    const tokens = matches.slice(0, 50).map(function(m) { return m.token; });
+    
+    console.log('Fetching quotes for tokens:', tokens.slice(0, 3), '...');
+
+    const r = await fetch(BASE_URL + '/rest/secure/angelbroking/market/v1/quote/', {
+      method: 'POST',
+      headers: makeHeaders(API_KEY, true),
+      body: JSON.stringify({ 
+        mode: 'LTP', 
+        exchangeTokens: { NFO: tokens } 
+      })
+    });
+    const data = await r.json();
+    
+    console.log('Quote response status:', data.status, 'message:', data.message);
+    console.log('Fetched count:', data.data ? data.data.fetched ? data.data.fetched.length : 0 : 0);
+    console.log('Unfetched count:', data.data ? data.data.unfetched ? data.data.unfetched.length : 0 : 0);
+
+    if (!data.status) {
+      return res.json({ 
+        success: false, 
+        message: data.message,
+        errorcode: data.errorcode,
+        debug: { tokensSent: tokens.length, sampleTokens: tokens.slice(0, 3) }
+      });
     }
 
-    let allQuotes = [];
+    // If we got data, build full chain
+    let allQuotes = data.data.fetched || [];
+    
+    // Get remaining batches
+    const remaining = matches.slice(50);
+    const batches = [];
+    for (let i = 0; i < remaining.length; i += 50) {
+      batches.push(remaining.slice(i, i + 50).map(function(m) { return m.token; }));
+    }
+
     for (let b = 0; b < batches.length; b++) {
-      const r = await fetch(BASE_URL + '/rest/secure/angelbroking/market/v1/quote/', {
+      const br = await fetch(BASE_URL + '/rest/secure/angelbroking/market/v1/quote/', {
         method: 'POST',
         headers: makeHeaders(API_KEY, true),
         body: JSON.stringify({ mode: 'FULL', exchangeTokens: { NFO: batches[b] } })
       });
-      const data = await r.json();
-      if (data.status && data.data && data.data.fetched) {
-        allQuotes = allQuotes.concat(data.data.fetched);
+      const bdata = await br.json();
+      if (bdata.status && bdata.data && bdata.data.fetched) {
+        allQuotes = allQuotes.concat(bdata.data.fetched);
       }
     }
+
+    const chain = allQuotes.map(function(quote) {
+      const inst = matches.find(function(m) { return m.token === quote.symbolToken; });
+      return {
+        strike: inst ? parseFloat(inst.strike) / 100 : null,
+        type: inst ? (inst.symbol.endsWith('CE') ? 'CE' : 'PE') : null,
+        symbol: quote.tradingSymbol,
+        token: quote.symbolToken,
+        ltp: quote.ltp,
+        open: quote.open,
+        high: quote.high,
+        low: quote.low,
+        close: quote.close,
+        change: quote.netChange,
+        changePct: quote.percentChange,
+        oi: quote.opnInterest,
+        volume: quote.tradeVolume
+      };
+    });
+
+    res.json({ 
+      success: true, 
+      symbol: symbol, 
+      expiry: expiry, 
+      instrumentsFound: matches.length,
+      strikeCount: chain.length, 
+      data: chain 
+    });
+  } catch (err) {
+    console.log('Option chain error:', err.message);
+    res.json({ success: false, message: err.message });
+  }
+});
 
     const chain = allQuotes.map(function(quote) {
       const inst = matches.find(function(m) { return m.token === quote.symbolToken; });
