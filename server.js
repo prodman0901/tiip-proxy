@@ -7,8 +7,11 @@ app.use(cors({ origin: '*', methods: ['GET','POST','OPTIONS'], allowedHeaders: [
 app.options('*', cors());
 app.use(express.json());
 
-let smartApi = null;
-let sessionData = null;
+const BASE_URL = 'https://apiconnect.angelone.in';
+
+let jwtToken = null;
+let refreshToken = null;
+let feedToken = null;
 let lastLogin = null;
 
 const API_KEY = process.env.SMART_API_KEY;
@@ -16,34 +19,83 @@ const CLIENT_CODE = process.env.CLIENT_CODE;
 const PIN = process.env.PIN;
 const TOTP_SECRET = process.env.TOTP_SECRET;
 
+function authHeaders(apiKey) {
+  return {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'X-UserType': 'USER',
+    'X-SourceID': 'WEB',
+    'X-ClientLocalIP': '127.0.0.1',
+    'X-ClientPublicIP': '127.0.0.1',
+    'X-MACAddress': '00:00:00:00:00:00',
+    'X-PrivateKey': apiKey
+  };
+}
+
 async function doLogin(apiKey, clientCode, pin, totpSecret) {
   try {
     const totp = speakeasy.totp({ secret: totpSecret, encoding: 'base32' });
-    console.log('TOTP:', totp);
-    const { SmartAPI } = require('smartapi-javascript');
-    smartApi = new SmartAPI({ api_key: apiKey });
-    const session = await smartApi.generateSession(clientCode, pin, totp);
-    if (session.status) {
-      sessionData = session.data;
+    console.log('TOTP generated:', totp);
+
+    const response = await fetch(
+      `${BASE_URL}/rest/auth/angelbroking/user/v1/loginByPassword`,
+      {
+        method: 'POST',
+        headers: authHeaders(apiKey),
+        body: JSON.stringify({
+          clientcode: clientCode,
+          password: pin,
+          totp: totp
+        })
+      }
+    );
+    const data = await response.json();
+
+    if (data.status) {
+      jwtToken = data.data.jwtToken;
+      refreshToken = data.data.refreshToken;
+      feedToken = data.data.feedToken;
       lastLogin = new Date();
-      console.log('✅ Login successful');
-      console.log('Available methods:', Object.getOwnPropertyNames(Object.getPrototypeOf(smartApi)));
+      console.log('✅ Login successful at', lastLogin);
       return { success: true };
     }
-    return { success: false, message: session.message };
+    console.log('❌ Login failed:', data.message);
+    return { success: false, message: data.message };
   } catch (err) {
+    console.log('❌ Error:', err.message);
     return { success: false, message: err.message };
   }
 }
 
+async function apiCall(endpoint, method, body, apiKey) {
+  const headers = {
+    ...authHeaders(apiKey),
+    'Authorization': `Bearer ${jwtToken}`
+  };
+  const response = await fetch(`${BASE_URL}${endpoint}`, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined
+  });
+  return response.json();
+}
+
 setInterval(async () => {
-  if (API_KEY) await doLogin(API_KEY, CLIENT_CODE, PIN, TOTP_SECRET);
+  if (API_KEY) {
+    console.log('⏰ Re-login...');
+    await doLogin(API_KEY, CLIENT_CODE, PIN, TOTP_SECRET);
+  }
 }, 3 * 60 * 60 * 1000);
 
 app.get('/', (req, res) => res.json({ status: 'running' }));
 
 app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', connected: !!sessionData, lastLogin, timestamp: new Date().toISOString() });
+  res.json({
+    status: 'ok',
+    connected: !!jwtToken,
+    lastLogin,
+    timestamp: new Date().toISOString()
+  });
 });
 
 app.post('/api/login', async (req, res) => {
@@ -52,59 +104,57 @@ app.post('/api/login', async (req, res) => {
   res.json(result);
 });
 
+// Live quotes
 app.post('/api/quotes', async (req, res) => {
   try {
-    if (!smartApi) return res.json({ success: false, message: 'Not logged in' });
-    
-    // Try multiple method names depending on library version
-    let data;
-    if (typeof smartApi.getMarketData === 'function') {
-      data = await smartApi.getMarketData({ mode: 'FULL', exchangeTokens: req.body.tokens });
-    } else if (typeof smartApi.marketData === 'function') {
-      data = await smartApi.marketData({ mode: 'FULL', exchangeTokens: req.body.tokens });
-    } else if (typeof smartApi.getLTP === 'function') {
-      data = await smartApi.getLTP({ exchangeTokens: req.body.tokens });
-    } else {
-      return res.json({ success: false, message: 'No quotes method found', availableMethods: Object.getOwnPropertyNames(Object.getPrototypeOf(smartApi)) });
-    }
-    res.json({ success: true, data: data.data });
-  } catch (err) { 
-    res.json({ success: false, message: err.message }); 
+    if (!jwtToken) return res.json({ success: false, message: 'Not logged in' });
+    const data = await apiCall(
+      '/rest/secure/angelbroking/market/v1/quote/',
+      'POST',
+      {
+        mode: 'FULL',
+        exchangeTokens: req.body.tokens
+      },
+      API_KEY
+    );
+    res.json({ success: data.status, data: data.data, message: data.message });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
   }
 });
 
+// Option chain via instrument search + quotes
 app.post('/api/option-chain', async (req, res) => {
   try {
-    if (!smartApi) return res.json({ success: false, message: 'Not logged in' });
-    res.json({ success: false, message: 'Option chain not yet wired - need correct method name' });
-  } catch (err) { 
-    res.json({ success: false, message: err.message }); 
+    if (!jwtToken) return res.json({ success: false, message: 'Not logged in' });
+    // SmartAPI doesn't have a direct option chain endpoint
+    // Need to fetch instrument master + filter + get quotes
+    res.json({ success: false, message: 'Use instrument master + quotes approach' });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
   }
 });
 
+// Historical candles
 app.post('/api/candles', async (req, res) => {
   try {
-    if (!smartApi) return res.json({ success: false, message: 'Not logged in' });
-    let data;
-    if (typeof smartApi.getCandleData === 'function') {
-      data = await smartApi.getCandleData({ exchange: 'NSE', symboltoken: req.body.token, interval: req.body.interval, fromdate: req.body.fromDate, todate: req.body.toDate });
-    } else if (typeof smartApi.candleData === 'function') {
-      data = await smartApi.candleData({ exchange: 'NSE', symboltoken: req.body.token, interval: req.body.interval, fromdate: req.body.fromDate, todate: req.body.toDate });
-    } else {
-      return res.json({ success: false, message: 'No candle method found' });
-    }
-    res.json({ success: true, data: data.data });
-  } catch (err) { 
-    res.json({ success: false, message: err.message }); 
+    if (!jwtToken) return res.json({ success: false, message: 'Not logged in' });
+    const data = await apiCall(
+      '/rest/secure/angelbroking/historical/v1/getCandleData',
+      'POST',
+      {
+        exchange: req.body.exchange || 'NSE',
+        symboltoken: req.body.token,
+        interval: req.body.interval,
+        fromdate: req.body.fromDate,
+        todate: req.body.toDate
+      },
+      API_KEY
+    );
+    res.json({ success: data.status, data: data.data, message: data.message });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
   }
-});
-
-// Debug endpoint - shows available SDK methods
-app.get('/api/debug-methods', (req, res) => {
-  if (!smartApi) return res.json({ message: 'Not logged in yet' });
-  res.json({ 
-    methods: Object.getOwnPropertyNames(Object.getPrototypeOf(smartApi))
-  });
 });
 
 const PORT = process.env.PORT || 5001;
