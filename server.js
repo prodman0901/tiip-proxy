@@ -164,3 +164,65 @@ app.listen(PORT, '0.0.0.0', async () => {
     await doLogin(API_KEY, CLIENT_CODE, PIN, TOTP_SECRET);
   }
 });
+
+// ── INSTRUMENT MASTER (cached) ───────────────────
+let instrumentMaster = null;
+let instrumentMasterFetchedAt = null;
+
+async function loadInstrumentMaster() {
+  try {
+    console.log('Loading instrument master...');
+    const response = await fetch(
+      'https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json'
+    );
+    instrumentMaster = await response.json();
+    instrumentMasterFetchedAt = new Date();
+    console.log('✅ Instrument master loaded:', instrumentMaster.length, 'instruments');
+  } catch (err) {
+    console.log('❌ Failed to load instrument master:', err.message);
+  }
+}
+
+// Refresh instrument master daily
+setInterval(loadInstrumentMaster, 24 * 60 * 60 * 1000);
+
+app.get('/api/option-chain-v2/:symbol/:expiry', async (req, res) => {
+  try {
+    if (!jwtToken) return res.json({ success: false, message: 'Not logged in' });
+    if (!instrumentMaster) await loadInstrumentMaster();
+
+    const symbol = req.params.symbol.toUpperCase();
+    const expiry = req.params.expiry.toUpperCase(); // e.g. 26JUN2025
+
+    // Filter instrument master for matching options
+    const matches = instrumentMaster.filter(inst =>
+      inst.name === symbol &&
+      inst.expiry === expiry &&
+      (inst.symbol.endsWith('CE') || inst.symbol.endsWith('PE'))
+    );
+
+    if (matches.length === 0) {
+      return res.json({ success: false, message: 'No matching instruments found', symbol, expiry });
+    }
+
+    // Get tokens for quotes call
+    const tokens = matches.map(m => m.token);
+
+    const quotesData = await apiCall(
+      '/rest/secure/angelbroking/market/v1/quote/',
+      'POST',
+      { mode: 'FULL', exchangeTokens: { NFO: tokens } },
+      API_KEY
+    );
+
+    res.json({
+      success: true,
+      symbol,
+      expiry,
+      instrumentCount: matches.length,
+      data: quotesData.data
+    });
+  } catch (err) {
+    res.json({ success: false, message: err.message });
+  }
+});
