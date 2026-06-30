@@ -202,6 +202,14 @@ app.get('/api/option-chain/:symbol/:expiry', async function(req, res) {
 });
 
 const PORT = process.env.PORT || 5001;
+app.get('/api/debug/:symbol', function(req, res) {
+  if (!instruments) return res.json({ message: 'not loaded' });
+  const symbol = req.params.symbol.toUpperCase();
+  const matches = instruments.filter(function(inst) {
+    return inst.name === symbol;
+  }).slice(0, 5);
+  res.json({ sample: matches });
+});
 app.listen(PORT, '0.0.0.0', async function() {
   console.log('Proxy running on port', PORT);
   if (API_KEY && CLIENT_CODE && PIN && TOTP_SECRET) {
