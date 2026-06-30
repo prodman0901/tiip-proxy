@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const speakeasy = require('speakeasy');
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 app.use(cors({ origin: '*' }));
@@ -56,24 +58,17 @@ async function login(apiKey, clientCode, pin, totpSecret) {
   }
 }
 
-async function loadInstruments() {
+function loadInstruments() {
   try {
     console.log('Loading instrument master from disk...');
-    const fs = require('fs');
-    const path = require('path');
     const filePath = path.join(__dirname, 'instruments.json');
     if (fs.existsSync(filePath)) {
       const text = fs.readFileSync(filePath, 'utf8');
       instruments = JSON.parse(text);
       instrumentsLoadedAt = new Date();
-      console.log('Instruments loaded from disk:', instruments.length);
+      console.log('Instruments loaded:', instruments.length);
     } else {
-      console.log('instruments.json not found on disk, trying URL...');
-      const res = await fetch('https://margincalculator.angelbroking.com/OpenAPI_File/files/OpenAPIScripMaster.json');
-      const text2 = await res.text();
-      instruments = JSON.parse(text2);
-      instrumentsLoadedAt = new Date();
-      console.log('Instruments loaded from URL:', instruments.length);
+      console.log('instruments.json not found');
     }
   } catch (err) {
     console.log('Instrument load failed:', err.message);
@@ -83,8 +78,6 @@ async function loadInstruments() {
 setInterval(function() {
   if (API_KEY) login(API_KEY, CLIENT_CODE, PIN, TOTP_SECRET);
 }, 3 * 60 * 60 * 1000);
-
-setInterval(loadInstruments, 24 * 60 * 60 * 1000);
 
 app.get('/api/health', function(req, res) {
   res.json({
@@ -117,17 +110,17 @@ app.post('/api/quotes', async function(req, res) {
   }
 });
 
-app.get('/api/load-instruments', async function(req, res) {
-  await loadInstruments();
-  res.json({
-    success: !!instruments,
-    count: instruments ? instruments.length : 0,
-    message: instruments ? 'Loaded successfully' : 'Failed to load'
-  });
+app.get('/api/debug/:symbol', function(req, res) {
+  if (!instruments) return res.json({ message: 'not loaded' });
+  const symbol = req.params.symbol.toUpperCase();
+  const matches = instruments.filter(function(inst) {
+    return inst.name === symbol;
+  }).slice(0, 5);
+  res.json({ sample: matches });
 });
 
 app.get('/api/expiries/:symbol', function(req, res) {
-  if (!instruments) return res.json({ success: false, message: 'Instruments not loaded yet. Call /api/load-instruments first.' });
+  if (!instruments) return res.json({ success: false, message: 'Instruments not loaded' });
   const symbol = req.params.symbol.toUpperCase();
   const matches = instruments.filter(function(inst) {
     return inst.name === symbol && inst.instrumenttype === 'OPTIDX';
@@ -146,66 +139,57 @@ app.get('/api/option-chain/:symbol/:expiry', async function(req, res) {
     const expiry = req.params.expiry.toUpperCase();
 
     const matches = instruments.filter(function(inst) {
-      return inst.name === symbol && 
-             inst.expiry === expiry && 
+      return inst.name === symbol &&
+             inst.expiry === expiry &&
              inst.instrumenttype === 'OPTIDX';
     });
 
     if (matches.length === 0) {
       return res.json({
         success: false,
-        message: 'No instruments found',
-        symbol: symbol,
-        expiry: expiry,
-        hint: 'Check /api/expiries/' + symbol
+        message: 'No instruments found for ' + symbol + ' ' + expiry,
+        hint: 'Check /api/expiries/' + symbol + ' for valid expiry dates'
       });
     }
 
     console.log('Found', matches.length, 'instruments for', symbol, expiry);
 
-    // Get first batch of 50 tokens for testing
     const tokens = matches.slice(0, 50).map(function(m) { return m.token; });
-    
-    console.log('Fetching quotes for tokens:', tokens.slice(0, 3), '...');
+    console.log('Sample tokens:', tokens.slice(0, 3));
 
     const r = await fetch(BASE_URL + '/rest/secure/angelbroking/market/v1/quote/', {
       method: 'POST',
       headers: makeHeaders(API_KEY, true),
-      body: JSON.stringify({ 
-        mode: 'LTP', 
-        exchangeTokens: { NFO: tokens } 
-      })
+      body: JSON.stringify({ mode: 'LTP', exchangeTokens: { NFO: tokens } })
     });
     const data = await r.json();
-    
-    console.log('Quote response status:', data.status, 'message:', data.message);
-    console.log('Fetched count:', data.data ? data.data.fetched ? data.data.fetched.length : 0 : 0);
-    console.log('Unfetched count:', data.data ? data.data.unfetched ? data.data.unfetched.length : 0 : 0);
+
+    console.log('Quote status:', data.status, 'message:', data.message);
+    console.log('Fetched:', data.data && data.data.fetched ? data.data.fetched.length : 0);
+    console.log('Unfetched:', data.data && data.data.unfetched ? data.data.unfetched.length : 0);
 
     if (!data.status) {
-      return res.json({ 
-        success: false, 
+      return res.json({
+        success: false,
         message: data.message,
         errorcode: data.errorcode,
-        debug: { tokensSent: tokens.length, sampleTokens: tokens.slice(0, 3) }
+        debug: {
+          instrumentsFound: matches.length,
+          tokensSent: tokens.length,
+          sampleTokens: tokens.slice(0, 3)
+        }
       });
     }
 
-    // If we got data, build full chain
     let allQuotes = data.data.fetched || [];
-    
-    // Get remaining batches
-    const remaining = matches.slice(50);
-    const batches = [];
-    for (let i = 0; i < remaining.length; i += 50) {
-      batches.push(remaining.slice(i, i + 50).map(function(m) { return m.token; }));
-    }
 
-    for (let b = 0; b < batches.length; b++) {
+    const remaining = matches.slice(50);
+    for (let i = 0; i < remaining.length; i += 50) {
+      const batch = remaining.slice(i, i + 50).map(function(m) { return m.token; });
       const br = await fetch(BASE_URL + '/rest/secure/angelbroking/market/v1/quote/', {
         method: 'POST',
         headers: makeHeaders(API_KEY, true),
-        body: JSON.stringify({ mode: 'FULL', exchangeTokens: { NFO: batches[b] } })
+        body: JSON.stringify({ mode: 'FULL', exchangeTokens: { NFO: batch } })
       });
       const bdata = await br.json();
       if (bdata.status && bdata.data && bdata.data.fetched) {
@@ -232,54 +216,22 @@ app.get('/api/option-chain/:symbol/:expiry', async function(req, res) {
       };
     });
 
-    res.json({ 
-      success: true, 
-      symbol: symbol, 
-      expiry: expiry, 
+    res.json({
+      success: true,
+      symbol: symbol,
+      expiry: expiry,
       instrumentsFound: matches.length,
-      strikeCount: chain.length, 
-      data: chain 
+      strikeCount: chain.length,
+      data: chain
     });
+
   } catch (err) {
     console.log('Option chain error:', err.message);
     res.json({ success: false, message: err.message });
   }
 });
 
-    const chain = allQuotes.map(function(quote) {
-      const inst = matches.find(function(m) { return m.token === quote.symbolToken; });
-      return {
-        strike: inst ? parseFloat(inst.strike) / 100 : null,
-        type: inst ? (inst.symbol.endsWith('CE') ? 'CE' : 'PE') : null,
-        symbol: quote.tradingSymbol,
-        token: quote.symbolToken,
-        ltp: quote.ltp,
-        open: quote.open,
-        high: quote.high,
-        low: quote.low,
-        close: quote.close,
-        change: quote.netChange,
-        changePct: quote.percentChange,
-        oi: quote.opnInterest,
-        volume: quote.tradeVolume
-      };
-    });
-
-    res.json({ success: true, symbol: symbol, expiry: expiry, strikeCount: chain.length, data: chain });
-  } catch (err) {
-    res.json({ success: false, message: err.message });
-  }
-});
-
 const PORT = process.env.PORT || 5001;
-app.get('/api/debug/:symbol', function(req, res) {
-  if (!instruments) return res.json({ message: 'not loaded' });
-  const symbol = req.params.symbol.toUpperCase();
-  const matches = instruments.filter(function(inst) {
-    return inst.name === symbol;
-  }).slice(0, 5);
-  res.json({ sample: matches });
-});
 app.listen(PORT, '0.0.0.0', async function() {
   console.log('Proxy running on port', PORT);
   if (API_KEY && CLIENT_CODE && PIN && TOTP_SECRET) {
