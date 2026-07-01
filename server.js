@@ -10,6 +10,7 @@ app.use(express.json());
 
 const BASE_URL = 'https://apiconnect.angelone.in';
 let jwtToken = null;
+let feedToken = null;
 let lastLogin = null;
 let instruments = null;
 let instrumentsLoadedAt = null;
@@ -30,7 +31,10 @@ function makeHeaders(apiKey, withAuth) {
     'X-MACAddress': '00:00:00:00:00:00',
     'X-PrivateKey': apiKey
   };
-  if (withAuth) h['Authorization'] = 'Bearer ' + jwtToken;
+  if (withAuth) {
+    h['Authorization'] = 'Bearer ' + jwtToken;
+    if (feedToken) h['X-FeedToken'] = feedToken;
+  }
   return h;
 }
 
@@ -46,7 +50,9 @@ async function login(apiKey, clientCode, pin, totpSecret) {
     const data = await res.json();
     if (data.status) {
       jwtToken = data.data.jwtToken;
+      feedToken = data.data.feedToken;
       lastLogin = new Date();
+      console.log('Feed token present:', !!feedToken);
       console.log('Login OK at', lastLogin);
       return { success: true };
     }
@@ -103,7 +109,12 @@ app.post('/api/quotes', async function(req, res) {
       headers: makeHeaders(API_KEY, true),
       body: JSON.stringify({ mode: 'FULL', exchangeTokens: req.body.tokens })
     });
+    console.log('HTTP Status:', r.status);
+    console.log('HTTP Status:', r.status);
     const data = await r.json();
+    console.log(JSON.stringify(data, null, 2));
+    console.log('First instrument:', matches[0]);
+    console.log(JSON.stringify(data, null, 2));
     res.json({ success: data.status, data: data.data, message: data.message });
   } catch (err) {
     res.json({ success: false, message: err.message });
@@ -160,7 +171,7 @@ app.get('/api/option-chain/:symbol/:expiry', async function(req, res) {
     const r = await fetch(BASE_URL + '/rest/secure/angelbroking/market/v1/quote/', {
       method: 'POST',
       headers: makeHeaders(API_KEY, true),
-      body: JSON.stringify({ mode: 'LTP', exchangeTokens: { NFO: tokens } })
+      body: JSON.stringify({ mode: 'FULL', exchangeTokens: { NFO: tokens } })
     });
     const data = await r.json();
 
