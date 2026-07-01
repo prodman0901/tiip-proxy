@@ -208,24 +208,82 @@ app.get('/api/option-chain/:symbol/:expiry', async function(req, res) {
       }
     }
 
-    const chain = allQuotes.map(function(quote) {
-      const inst = matches.find(function(m) { return m.token === quote.symbolToken; });
-      return {
-        strike: inst ? parseFloat(inst.strike) / 100 : null,
-        type: inst ? (inst.symbol.endsWith('CE') ? 'CE' : 'PE') : null,
-        symbol: quote.tradingSymbol,
-        token: quote.symbolToken,
-        ltp: quote.ltp,
-        open: quote.open,
-        high: quote.high,
-        low: quote.low,
-        close: quote.close,
-        change: quote.netChange,
-        changePct: quote.percentChange,
-        oi: quote.opnInterest,
-        volume: quote.tradeVolume
-      };
+    console.log("Total Quotes:", allQuotes.length);
+
+if (allQuotes.length > 0) {
+  console.log("First Quote:");
+  console.log(JSON.stringify(allQuotes[0], null, 2));
+}
+
+console.log("First Instrument:");
+console.log(JSON.stringify(matches[0], null, 2));
+
+const chain = allQuotes
+  .map(function(quote) {
+
+    const symbolToken = String(
+      quote.symbolToken ||
+      quote.symboltoken ||
+      quote.symbol_token ||
+      ""
+    );
+
+    const inst = matches.find(function(m) {
+      return String(m.token) === symbolToken;
     });
+
+    if (!inst) {
+      console.log("No instrument match for token:", symbolToken);
+      return null;
+    }
+
+    return {
+      strike: Number(inst.strike) / 100,
+      type: inst.symbol.endsWith("CE") ? "CE" : "PE",
+      symbol:
+        quote.tradingSymbol ||
+        quote.tradingsymbol ||
+        inst.symbol,
+
+      token: symbolToken,
+
+      ltp: quote.ltp,
+
+      open: quote.open,
+
+      high: quote.high,
+
+      low: quote.low,
+
+      close: quote.close,
+
+      change:
+        quote.netChange ??
+        quote.netchange ??
+        0,
+
+      changePct:
+        quote.percentChange ??
+        quote.percentchange ??
+        0,
+
+      oi:
+        quote.opnInterest ??
+        quote.openInterest ??
+        quote.openinterest ??
+        0,
+
+      volume:
+        quote.tradeVolume ??
+        quote.tradevolume ??
+        quote.volume ??
+        0
+    };
+
+  })
+  .filter(Boolean);
+
+console.log("Final Chain Size:", chain.length);
 
     res.json({
       success: true,
